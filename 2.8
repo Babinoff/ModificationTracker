@@ -1,0 +1,330 @@
+# -*- coding: utf-8 -*- 
+#-----------------------Импоорт библиотек----------------------
+import sys 
+sys.path.append("C:\Program Files (x86)\IronPython 2.7\Lib")
+import os
+import time
+
+import clr
+clr.AddReference('RevitAPI')
+import Autodesk
+from Autodesk.Revit.DB import*
+from Autodesk.Revit.DB.Analysis import *
+from Autodesk.Revit.Creation import *
+
+clr.AddReference('RevitAPIUI')
+from Autodesk.Revit.UI.Selection import *
+
+clr.AddReference('RevitServices')
+from RevitServices.Persistence import DocumentManager
+import System
+from System.Collections.Generic import*
+from System import Type, Activator
+Excel = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application"))
+
+import System
+from System import Type
+clr.AddReference('System')
+from System.Collections.Generic import List
+
+import traceback
+test2 = []
+
+#-----------------------Классы и Функции-----------------------------------------------------------		
+def ModelComparison2(docA,docB):	
+	catfilters = []
+	for i in categories:
+		catfilters.append(ElementCategoryFilter(System.Enum.ToObject(BuiltInCategory, int(str(i.Id)))))
+		
+	catfilterlist = List[ElementFilter](catfilters)
+	filter = LogicalOrFilter(catfilterlist)
+
+	docAcollector = FilteredElementCollector(docA).WherePasses(filter).WhereElementIsNotElementType().ToElements()
+	docBcollector = FilteredElementCollector(docB).WherePasses(filter).WhereElementIsNotElementType().ToElements()
+
+	#GUID lists
+	docAguid = [e.UniqueId for e in docAcollector]
+	docBguid = [e.UniqueId for e in docBcollector]
+
+	#Sorting existing elements, new elements and deleted elements
+
+	existingguid = [e for e in docAguid if e in docBguid]
+	newguid = [e for e in docAguid if e not in docBguid]
+	deletedguid = [e for e in docBguid if e not in docAguid]
+
+	existingA = [docA.GetElement(e) for e in existingguid]
+	existingB = [docB.GetElement(e) for e in existingguid]
+	new = [docA.GetElement(e) for e in newguid]
+	deleted = [docB.GetElement(e) for e in deletedguid]
+	newreport = reportformat(new)
+	deletedreport = reportformat(deleted)
+
+	#report = 'The model contains %d elements of the selected categories, there are %d new elements and %d deleted elements compared to the previous indice. \nNew elements : ' %(len(docAcollector),len(new),len(deleted)) + newreport + '\nDeleted elements : ' + deletedreport
+	report = [new,deleted]
+	
+	return report,existingA,existingB
+
+def reportformat(x):
+	val = [UnwrapElement(e).Category.Name for e in x]
+	values = set(val)
+	newlist = [len([y for y in val if y==x]) for x in values]
+	strreport = []
+	for i,j in zip(values,newlist):
+		strreport.append('%d %s element(s)'%(j,i))
+	return ', '.join(strreport)
+
+#---------------ModificationTracker.AllChanges------------------------------------------------------------	
+def flatten(container):
+    for i in container:
+        if isinstance(i, (list,tuple)):
+            for j in flatten(i):
+                yield j
+        else:
+            yield i
+
+def tostring(x):
+	return x.ToString()
+	
+def getgeomlist(x):
+	return list(x.get_Geometry(Options()))
+
+def getvertices(x):
+	#getting geometryelements as list
+	geomelems = getgeomlist(x)
+	#getting nested instance geometry for all geometry instances
+	while any('GeometryInstance' in g for g in map(tostring,geomelems)):
+		for index,i in enumerate(geomelems):
+			try:
+				if 'GeometryInstance' in i.ToString():
+					geomelems[index] = i.GetInstanceGeometry()
+				else:
+					continue
+			except Exception as e:
+				test2.append([e,i.ToString()])
+			geomelems = list(flatten(geomelems))[0]
+	#getting all faces, keeping meshes
+	faces = []
+	for i in geomelems:
+		if 'Solid' in i.ToString():
+			faces.append(list(i.Faces))
+		elif 'Mesh' in i.ToString():
+			faces.append(i)
+		else:
+			continue
+	faces = list(flatten(faces))
+	#getting all meshes
+	meshes = []
+	for f in faces:
+		if 'Mesh' in f.ToString():
+			meshes.append(f)
+		else:
+			meshes.append(f.Triangulate())
+	#getting all vertices
+	vertexlist = []
+	for m in meshes:
+		vertexlist.append(list(m.Vertices))
+	vertexlist = list(flatten(vertexlist))
+	#creating sorted vertex string representation of object for comparison with other indice of element
+	vertexstr = ', '.join(sorted(set(map(tostring,vertexlist))))
+	return vertexstr
+
+def getvertices2(x):
+	#getting geometryelements as list
+	geomelems = getgeomlist(x)
+	#getting nested instance geometry for all geometry instances
+	geominstan = []
+	while any('GeometryInstance' in g for g in map(tostring,geomelems)):
+		for i in geomelems:
+			try:
+				if 'GeometryInstance' in i.ToString():
+					geominstan.append(i.GetInstanceGeometry())
+				else:
+					continue
+			except Exception as e:
+				test2.append([e,i.ToString()])
+			#geomelems = list(flatten(geomelems))[0]
+	#getting all faces, keeping meshes
+	faces = []
+	for i in geominstan:
+		if 'Solid' in i.ToString():
+			faces.append(list(i.Faces))
+		elif 'Mesh' in i.ToString():
+			faces.append(i)
+		else:
+			continue
+	faces = list(flatten(faces))
+	#getting all meshes
+	meshes = []
+	for f in faces:
+		if 'Mesh' in f.ToString():
+			meshes.append(f)
+		else:
+			meshes.append(f.Triangulate())
+	#getting all vertices
+	vertexlist = []
+	for m in meshes:
+		vertexlist.append(list(m.Vertices))
+	vertexlist = list(flatten(vertexlist))
+	#creating sorted vertex string representation of object for comparison with other indice of element
+	vertexstr = ', '.join(sorted(set(map(tostring,vertexlist))))
+	return vertexstr	
+	
+def parametersnapshot(x):
+	parameters = x.Parameters
+	paramnames = [p.Definition.Name for p in parameters]
+	sortedindex = sorted(range(len(paramnames)), key = lambda k : paramnames[k])
+	sortedparameters = [paramnames[i] for i in sortedindex]
+	paramvalues = []
+	for p in parameters:
+		if p.AsString() != None:
+			paramvalues.append(p.AsString())
+		else :
+			paramvalues.append(p.AsValueString())
+	sortedvalues = [paramvalues[i] for i in sortedindex]
+	return ', '.join(['%s : %s' % (param,value) for param,value in zip(sortedparameters,sortedvalues)])	
+	
+def AllChanges2(elementsA,elementsB):
+	report = []
+	geomtest = []
+	paramtest = []
+	for eA,eB in zip(elementsA,elementsB):
+		geomtest.append(getvertices2(eA) == getvertices2(eB))
+		paramtest.append(parametersnapshot(eA) == parametersnapshot(eB))
+
+	samegeometrysameparameters = [i for (i,gt,pt) in zip(elementsA,geomtest,paramtest) if gt and pt]
+	differentgeometrysameparameters = [i for (i,gt,pt) in zip(elementsA,geomtest,paramtest) if gt == False and pt == True]
+	samegeometrydifferentparameters = [i for (i,gt,pt) in zip(elementsA,geomtest,paramtest) if gt == True and pt == False]
+	differentgeometrydifferentparameters = [i for (i,gt,pt) in zip(elementsA,geomtest,paramtest) if gt == False and pt == False]
+
+	#report = '%d element(s) tested \n%d element(s) with same geometry and parameters, \n%d element(s) with same geometry and different parameters, \n%d element(s) with different geometry and same parameters, \n%d element(s) with different geometry and different parameters' %(len(elementsA),len(samegeometrysameparameters),len(samegeometrydifferentparameters),len(differentgeometrysameparameters), len(differentgeometrydifferentparameters))	
+	report = differentgeometrysameparameters+differentgeometrydifferentparameters+samegeometrydifferentparameters
+	return report
+	
+#-----------------------Сравнение моделей----------------
+	
+def ModificationTracker3(docA,docB):
+	mc_report,elementsA,elementsB = ModelComparison2(docA,docB)
+	new = mc_report[0]
+	deleted = mc_report[1]
+	modifed = AllChanges2(elementsA,elementsB)
+	#report = [len(new),len(deleted),len(modifed)]
+	report = [new,deleted,modifed]
+
+	return report	
+	
+#-----------------------SpatialFieldManager Функции---------------------
+def elementgeomfaces(element):
+	geomElem = element.get_Geometry(Options())
+	for geomObj in geomElem:
+		geomSolid = geomObj
+	geom_faces = geomSolid.Faces
+	return geom_faces
+
+def coloredfaces(color_index,geom_faces):
+	i = color_index
+	for face in geom_faces:
+		bb = face.GetBoundingBox()
+		min = bb.Min
+		max = bb.Max
+		faceCenter = Autodesk.Revit.DB.UV((max.U + min.U)/2, (max.V + min.V)/2)
+		computeDerivatives  = face.ComputeDerivatives(faceCenter)
+		faceCenterNormal = computeDerivatives.BasisZ
+		faceCenterNormalMultiplied = faceCenterNormal.Normalize().Multiply(1.01)
+		trf = Transform.Identity
+		
+		idx = sfm.AddSpatialFieldPrimitive(face,trf)
+
+		uvPts = []
+		uvPts.Add(bb.Min)
+		
+		pnts = FieldDomainPointsByUV(uvPts)
+		
+		doubleList = List[float]()
+		valList = List[ValueAtPoint]()
+		fieldPointsUV = List[Autodesk.Revit.DB.UV]()
+		doubleList.Add(float(i))
+		valList.Add(ValueAtPoint(doubleList))
+		doubleList.Clear()
+		vals = FieldValues(valList)
+		sfm.UpdateSpatialFieldPrimitive(idx, pnts, vals, schemaIndex)
+		
+		valList.Clear()
+		fieldPointsUV.Clear()
+	
+#-----------------------АПИ параметры----------------------
+uiapp = DocumentManager.Instance.CurrentUIApplication
+app = uiapp.Application
+opn_opt = OpenOptions()
+opn_opt.AllowOpeningLocalByWrongUser = True
+
+#-----------------------SpatialFieldManager---------------------
+doc = DocumentManager.Instance.CurrentDBDocument
+uiapp = DocumentManager.Instance.CurrentUIApplication
+app = uiapp.Application
+sfm = SpatialFieldManager.GetSpatialFieldManager(doc.ActiveView)
+
+if sfm == None:
+	sfm = SpatialFieldManager.CreateSpatialFieldManager(doc.ActiveView, 1)
+
+sfm.Clear()
+resultschems = []
+
+idx=1
+test_value=0
+
+while test_value == 0:
+	try:
+		resultschems.append(sfm.GetResultSchema(idx)) #Собираем существующие схемы, но их не будет если есть sfm.Clear()
+		idx += 1
+	except:
+		test_value=1
+
+schem_name = "Schema Name Test"
+i = 1
+schemaIndex = None
+
+for rs in resultschems:
+	test.append(rs.Name)
+	if rs.Name == schem_name:
+		schemaIndex = i
+		break
+	else:
+		i+=1
+
+if schemaIndex == None:
+	resultSchema = AnalysisResultSchema("Schema Name Test", "Description Test1")
+	schemaIndex = sfm.RegisterResult(resultSchema)
+#-----------------------Рабочие параметры----------------------	
+test = None
+report = []
+files_name = []
+
+if isinstance(IN[0],list):
+	categories = IN[0]
+else:
+	categories = [IN[0]]
+	
+doc1_pth = IN[1]
+doc2_pth = IN[2]
+
+#@@@-----------------------Начало Скрипта----------------------
+
+mpath_docA = ModelPathUtils.ConvertUserVisiblePathToModelPath(doc1_pth)
+mpath_docB = ModelPathUtils.ConvertUserVisiblePathToModelPath(doc2_pth)
+
+doc1 = app.OpenDocumentFile(mpath_docA,opn_opt)
+doc2 = app.OpenDocumentFile(mpath_docB,opn_opt)
+
+report = ModificationTracker3(doc1,doc2)
+
+color_index = 0
+for r_list in report:
+	for element in r_list:
+		geom_faces = elementgeomfaces(element)
+		coloredfaces(color_index,geom_faces)
+	color_index +=1
+	
+doc1.Close(False)
+doc2.Close(False)
+
+OUT = test
